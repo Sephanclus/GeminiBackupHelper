@@ -1,13 +1,77 @@
 console.log("Gemini Backup Helper content script loaded.");
 
+let shouldCancel = false;
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'START_BACKUP') {
-        startBackup();
+        shouldCancel = false;
+        startBackup(false); // Not silent
         sendResponse({ status: 'started' });
+    } else if (request.action === 'START_BACKUP_ALL') {
+        shouldCancel = false;
+        startBackupAll();
+        sendResponse({ status: 'Batch backup started' });
+    } else if (request.action === 'CANCEL_BACKUP_ALL') {
+        shouldCancel = true;
+        console.log("Cancellation requested.");
+        sendResponse({ status: 'Cancelling...' });
+    } else if (request.action === 'DOWNLOAD_COMPLETE') {
+        console.log("Download complete detected by background script:", request.filename);
+        // You can add logic here to record the filename or URL to storage if needed
     }
 });
 
-async function startBackup() {
+async function startBackupAll() {
+    console.log("Starting batch backup...");
+    const convoSelector = '.conversation-items-container .conversation-title';
+    // We assume the list is loaded.
+    // Query once to get count? Or query dynamically?
+    // Querying dynamically is safer if list stays same size but DOM refs change.
+    // If list grows (infinite scroll), we might miss some, but usually it's static or "Load more".
+    // Let's rely on index.
+
+    let items = document.querySelectorAll(convoSelector);
+    const count = items.length;
+    console.log(`Found ${count} conversations.`);
+
+    for (let i = 0; i < count; i++) {
+        if (shouldCancel) {
+            console.log("Batch backup cancelled by user.");
+            break;
+        }
+
+        // Re-query in case DOM refreshed
+        items = document.querySelectorAll(convoSelector);
+        const item = items[i];
+
+        if (!item) {
+            console.warn(`Conversation item at index ${i} not found. Skipping.`);
+            continue;
+        }
+
+        const title = item.innerText;
+        console.log(`--- Processing Conversation ${i + 1}/${count}: ${title} ---`);
+
+        item.click();
+
+        // Wait for conversation to load. 
+        // We can wait for a bit, generic wait is safest for now.
+        await new Promise(r => setTimeout(r, 5000));
+
+        if (shouldCancel) break;
+
+        // Run backup for this page, silent mode (no alerts)
+        await startBackup(true);
+    }
+
+    if (!shouldCancel) {
+        showToast("Batch Backup All Completed!", 5000);
+    } else {
+        showToast("Batch Backup Cancelled!", 3000);
+    }
+}
+
+async function startBackup(silent = false) {
     console.log("Starting backup process...");
 
     // Selector from draft.md
@@ -80,13 +144,17 @@ async function startBackup() {
     console.log(`Planned to click ${finalCandidates.length} buttons.`);
 
     if (finalCandidates.length === 0) {
-        alert("No buttons found to click.");
+        showToast("No buttons found to click.", 3000);
         return;
     }
 
     let successCount = 0;
 
     for (let i = 0; i < finalCandidates.length; i++) {
+        if (shouldCancel) {
+            console.log("Backup cancelled during image processing.");
+            break;
+        }
         const button = finalCandidates[i];
         console.log(`Processing button ${i + 1}/${finalCandidates.length}`);
 
@@ -102,7 +170,11 @@ async function startBackup() {
         }
     }
 
-    alert(`Backup complete! Processed ${successCount}/${finalCandidates.length}.`);
+    if (!silent && !shouldCancel) {
+        showToast(`Backup complete! Processed ${successCount}/${finalCandidates.length}.`, 5000);
+    } else {
+        console.log(`Page backup complete. Processed ${successCount}/${finalCandidates.length}.`);
+    }
 }
 
 function clickAndWaitForDownload(button) {
@@ -165,4 +237,35 @@ function clickAndWaitForDownload(button) {
             }
         }, 30000); // 30 seconds per image
     });
+}
+
+function showToast(message, duration = 3000) {
+    const toast = document.createElement('div');
+    toast.textContent = message;
+    toast.style.position = 'fixed';
+    toast.style.bottom = '20px';
+    toast.style.right = '20px';
+    toast.style.backgroundColor = '#323232';
+    toast.style.color = 'white';
+    toast.style.padding = '12px 24px';
+    toast.style.borderRadius = '4px';
+    toast.style.zIndex = '999999';
+    toast.style.fontSize = '14px';
+    toast.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+    toast.style.transition = 'opacity 0.3s ease-in-out';
+    toast.style.opacity = '0';
+
+    document.body.appendChild(toast);
+
+    // Trigger animation
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+    });
+
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => {
+            document.body.removeChild(toast);
+        }, 300);
+    }, duration);
 }
